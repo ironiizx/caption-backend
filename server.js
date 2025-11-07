@@ -2,13 +2,10 @@
 import 'dotenv/config';
 import express from 'express';
 import fetch from 'node-fetch';
-import { pipeline, env, RawImage } from '@xenova/transformers'; // <--- RawImage VUELVE
+import { pipeline, env, RawImage } from '@xenova/transformers'; 
 import sharp from 'sharp';
 
-// ... (toda la configuración de Xenova, Config, App, CORS, / , /health, getPipe, /warmup, /ready, getImageBuffer y getSaturation sigue igual) ...
-// ... (copia y pega las líneas 5 a 130 de tu archivo actual) ...
 
-// ------------ Xenova / ONNX (WASM) ------------
 env.backends.onnx = 'wasm';
 env.useBrowserCache = false;
 env.allowLocalModels = true;
@@ -18,7 +15,7 @@ process.env.XENOVA_USE_LOCAL_MODELS =
 process.env.TRANSFORMERS_CACHE =
   process.env.TRANSFORMERS_CACHE ?? './.models-cache';
 
-// ------------ Config ------------
+
 const PORT = process.env.PORT || 8080;
 const PRIMARY_MODEL =
   process.env.MODEL_ID || 'Xenova/vit-gpt2-image-captioning';
@@ -28,7 +25,7 @@ let pipePromise = null;
 let ready = false;
 let activeModel = null;
 
-// ------------ App / middlewares ------------
+
 const app = express();
 app.use(express.json({ limit: '20mb' }));
 
@@ -114,14 +111,13 @@ function getSaturation(r, g, b) {
 }
 
 
-// ====== Endpoint principal /caption (REDISEÑADO) ======
 app.post('/caption', async (req, res) => {
   try {
     const { image_url, image_base64, max_new_tokens } = req.body || {};
     const t0 = Date.now();
 
-    // 1) Determinar el input (String) y el Buffer
-    let imageInput; // String (URL o Data URL)
+    
+    let imageInput; 
     if (image_url) {
       imageInput = image_url;
     } else if (image_base64) {
@@ -134,15 +130,13 @@ app.post('/caption', async (req, res) => {
       throw new Error('Falta image_url o image_base64 en el body');
     }
     
-    // Obtenemos el buffer (para Sharp)
+    
     const buffer = await getImageBuffer(image_url || image_base64);
 
-    // 2) --- Tareas en Paralelo ---
 
-    // Tarea A: Calcular Métricas (usa el Buffer)
     const metricsPromise = (async () => {
       const stats = await sharp(buffer).stats();
-      const edgeDensity = 0.0; // .canny() eliminado por estabilidad
+      const edgeDensity = 0.0; 
 
       const [rStats, gStats, bStats] = stats.channels;
       const dominantColor = `rgb(${stats.dominant.r}, ${stats.dominant.g}, ${stats.dominant.b})`;
@@ -157,10 +151,10 @@ app.post('/caption', async (req, res) => {
       };
     })();
 
-    // Tarea B: Calcular Caption (usa el String 'imageInput')
+    
     const captionPromise = (async () => {
       const pipe = await getPipe();
-      // RawImage.read() usa el string (URL o DataURL)
+      
       const img = await RawImage.read(imageInput); 
       const out = await pipe(img, {
         max_new_tokens: typeof max_new_tokens === 'number' ? max_new_tokens : 40,
@@ -168,13 +162,13 @@ app.post('/caption', async (req, res) => {
       return out;
     })();
 
-    // 3) Esperar a que ambas tareas terminen
+    
     const [metrics, out] = await Promise.all([
       metricsPromise,
       captionPromise,
     ]);
 
-    // 4) Respuesta
+   
     res.json({
       caption: out?.[0]?.generated_text ?? '',
       model: activeModel || PRIMARY_MODEL,
@@ -188,9 +182,9 @@ app.post('/caption', async (req, res) => {
 });
 
 
-// ------------ Arranque (precalienta sin bloquear) ------------
+
 getPipe().catch(() => {
-  /* no bloquea el start; /warmup puede reintentar */
+
 });
 
 app.listen(PORT, '0.0.0.0', () => {
