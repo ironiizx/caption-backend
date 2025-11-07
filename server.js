@@ -125,18 +125,29 @@ async function getImageBytes(input) {
 app.post('/caption', async (req, res) => {
   try {
     const { image_url, image_base64, max_new_tokens } = req.body || {};
-    const bytes = await getImageBytes(image_url || image_base64);
+    const src = image_url || image_base64;
+    if (!src) {
+      return res.status(400).json({ error: 'Send image_url or image_base64' });
+    }
 
-    const pipe = await getPipe(); // se asegura de que haya un modelo cargado
+    const bytes = await getImageBytes(src);
+
+    // Asegura que el modelo esté cargado
+    const pipe = await getPipe();
     const t0 = Date.now();
-    const out = await pipe(bytes, {
-      // Si querés, hacelo configurable desde el body
-      max_new_tokens: typeof max_new_tokens === 'number' ? max_new_tokens : 40,
-    });
+
+    // 👇 Formato correcto para Xenova: objeto con { inputs: Uint8Array }
+    const out = await pipe(
+      { inputs: bytes },
+      {
+        max_new_tokens:
+          typeof max_new_tokens === 'number' ? max_new_tokens : 40,
+      }
+    );
 
     res.json({
       caption: out?.[0]?.generated_text ?? '',
-      model: activeModel,
+      model: (typeof activeModel !== 'undefined' ? activeModel : MODEL_ID),
       latency_ms: Date.now() - t0,
     });
   } catch (e) {
@@ -144,6 +155,7 @@ app.post('/caption', async (req, res) => {
     res.status(500).json({ error: String(e?.message || e) });
   }
 });
+
 
 // ------------ Arranque (precalienta sin bloquear) ------------
 getPipe().catch(() => { /* no bloquea el start; /warmup puede reintentar */ });
