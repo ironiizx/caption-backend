@@ -3,16 +3,13 @@ import express from 'express';
 import fetch from 'node-fetch';
 import { pipeline, env } from '@xenova/transformers';
 
-// Forzar ONNX por WASM (evita binarios nativos)
 env.backends.onnx = 'wasm';
 env.useBrowserCache = false;
 env.allowLocalModels = true;
-// NO toques env.backends.onnx.wasm.numThreads acá
 
 const PORT = process.env.PORT || 8080;
 const MODEL_ID = process.env.MODEL_ID || 'Xenova/vit-gpt2-image-captioning';
 
-// cache local opcional (mejor si usás un Volume)
 process.env.XENOVA_USE_LOCAL_MODELS = process.env.XENOVA_USE_LOCAL_MODELS ?? '1';
 process.env.TRANSFORMERS_CACHE = process.env.TRANSFORMERS_CACHE ?? './.models-cache';
 
@@ -31,6 +28,9 @@ app.get('/', (_req, res) => {
   res.type('text').send('Caption backend up. Try POST /caption or GET /health');
 });
 
+app.get('/health', (_req, res) => {
+  res.json({ ok: true, model: MODEL_ID });
+});
 
 let pipePromise = null;
 async function getPipe() {
@@ -43,17 +43,15 @@ async function getPipe() {
 
 async function getImageBytes(input) {
   if (!input) throw new Error('Falta image_url o image_base64');
-  if (typeof input === 'string' && /^https?:\/\//i.test(input)) {
+  if (/^https?:\/\//i.test(input)) {
     const r = await fetch(input, { headers: { 'User-Agent': 'Mozilla/5.0' } });
-    if (!r.ok) throw new Error(`fetch ${r.status} al descargar imagen`);
+    if (!r.ok) throw new Error(`fetch ${r.status}`);
     return new Uint8Array(await r.arrayBuffer());
   }
-  if (typeof input === 'string' && input.startsWith('data:image/')) {
-    const b64 = input.split(',')[1];
-    return Buffer.from(b64, 'base64');
+  if (input.startsWith('data:image/')) {
+    return Buffer.from(input.split(',')[1], 'base64');
   }
-  if (typeof input === 'string') return Buffer.from(input, 'base64');
-  throw new Error('Formato de imagen no soportado');
+  return Buffer.from(input, 'base64');
 }
 
 app.post('/caption', async (req, res) => {
@@ -64,6 +62,7 @@ app.post('/caption', async (req, res) => {
     const pipe = await getPipe();
     const t0 = Date.now();
     const out = await pipe(bytes, { max_new_tokens: 40 });
+
     res.json({
       caption: out?.[0]?.generated_text ?? '',
       model: MODEL_ID,
