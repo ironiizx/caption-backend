@@ -121,8 +121,6 @@ async function getImageBytes(input) {
   throw new Error('Formato de imagen no soportado');
 }
 
-import { RawImage } from '@xenova/transformers';
-
 app.post('/caption', async (req, res) => {
   try {
     const { image_url, image_base64, max_new_tokens } = req.body || {};
