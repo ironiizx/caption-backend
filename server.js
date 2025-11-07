@@ -2,7 +2,7 @@
 import 'dotenv/config';
 import express from 'express';
 import fetch from 'node-fetch';
-import { pipeline, RawImage, env } from '@xenova/transformers';
+import { pipeline, env, RawImage } from '@xenova/transformers';
 
 // ------------ Xenova / ONNX (WASM) ------------
 env.backends.onnx = 'wasm';
@@ -98,27 +98,25 @@ app.get('/ready', (_req, res) => {
   res.json({ ready, model: activeModel });
 });
 
-// ------------ Util para obtener bytes de imagen ------------
-async function getImageBytes(input) {
-  if (!input) throw new Error('Falta image_url o image_base64');
-
-  // URL http(s)
-  if (typeof input === 'string' && /^https?:\/\//i.test(input)) {
-    const r = await fetch(input, { headers: { 'User-Agent': 'Mozilla/5.0' } });
-    if (!r.ok) throw new Error(`fetch ${r.status} al descargar imagen`);
-    return new Uint8Array(await r.arrayBuffer());
-  }
-  // DataURL base64
-  if (typeof input === 'string' && input.startsWith('data:image/')) {
-    const b64 = input.split(',')[1];
-    return Buffer.from(b64, 'base64');
-  }
-  // Base64 "crudo"
-  if (typeof input === 'string') {
-    return Buffer.from(input, 'base64');
+async function toRawImage({ image_url, image_base64 }) {
+  if (image_url) {
+    // (opcional) user-agent para hosts que lo piden
+    const r = await fetch(image_url, { headers: { 'User-Agent': 'Mozilla/5.0' } });
+    if (!r.ok) throw new Error(`fetch ${r.status}`);
+    const buf = new Uint8Array(await r.arrayBuffer());
+    // fromBuffer es lo más directo en Node
+    return await RawImage.fromBuffer(buf);
   }
 
-  throw new Error('Formato de imagen no soportado');
+  if (!image_base64) throw new Error('Falta image_url o image_base64');
+
+  // soporta data URL o base64 “puro”
+  const b64 = image_base64.startsWith('data:image/')
+    ? image_base64.split(',')[1]
+    : image_base64;
+
+  const buf = Buffer.from(b64, 'base64');
+  return await RawImage.fromBuffer(buf);
 }
 
 app.post('/caption', async (req, res) => {
@@ -141,13 +139,14 @@ app.post('/caption', async (req, res) => {
     const image = await RawImage.read(bytes);
 
     const pipe = await getPipe(); // modelo cargado
+
+    const raw = await toRawImage({ image_url, image_base64 });
+
     const t0 = Date.now();
 
-    const out = await pipe(
-      { inputs: image },
-      {
-        max_new_tokens:
-          typeof max_new_tokens === 'number' ? max_new_tokens : 40,
+    const out = await pipe(raw, {
+    max_new_tokens:
+    typeof max_new_tokens === 'number' ? max_new_tokens : 40,
       }
     );
 
