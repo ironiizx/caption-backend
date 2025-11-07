@@ -100,26 +100,29 @@ app.get('/ready', (_req, res) => {
   res.json({ ready, model: activeModel });
 });
 
-// -------- Util: obtener bytes crudos de la imagen --------
-async function getImageBytes(input) {
+// -------- Util: obtener un Buffer de la imagen --------
+async function getImageBuffer(input) {
   if (!input) throw new Error('Falta image_url o image_base64');
 
   // URL http(s)
   if (typeof input === 'string' && /^https?:\/\//i.test(input)) {
     const r = await fetch(input, { headers: { 'User-Agent': 'Mozilla/5.0' } });
     if (!r.ok) throw new Error(`fetch ${r.status}`);
-    return new Uint8Array(await r.arrayBuffer());
+    // Devuelve Buffer directo desde el ArrayBuffer
+    return Buffer.from(await r.arrayBuffer());
   }
 
   // data URL
   if (typeof input === 'string' && input.startsWith('data:image/')) {
     const b64 = input.split(',')[1];
-    return new Uint8Array(Buffer.from(b64, 'base64'));
+    // Devuelve el Buffer
+    return Buffer.from(b64, 'base64');
   }
 
   // base64 “puro”
   if (typeof input === 'string') {
-    return new Uint8Array(Buffer.from(input, 'base64'));
+    // Devuelve el Buffer
+    return Buffer.from(input, 'base64');
   }
 
   throw new Error('Formato de imagen no soportado');
@@ -130,11 +133,13 @@ app.post('/caption', async (req, res) => {
   try {
     const { image_url, image_base64, max_new_tokens } = req.body || {};
 
-    // 1) bytes (Uint8Array)
-    const bytes = await getImageBytes(image_url || image_base64);
+    // 1) bytes (Buffer)
+    //    👇 CAMBIO AQUÍ
+    const buffer = await getImageBuffer(image_url || image_base64);
 
     // 2) usar RawImage.read (compatibilidad Node)
-    const img = await RawImage.read(bytes);
+    //    👇 AHORA 'buffer' ES UN BUFFER, NO UN Uint8Array
+    const img = await RawImage.read(buffer); 
 
     // 3) asegurar modelo cargado
     const pipe = await getPipe();
