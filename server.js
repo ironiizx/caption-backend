@@ -3,23 +3,22 @@ import express from 'express';
 import fetch from 'node-fetch';
 import { pipeline, env } from '@xenova/transformers';
 
+// Forzar ONNX por WASM (evita binarios nativos)
 env.backends.onnx = 'wasm';
 env.useBrowserCache = false;
 env.allowLocalModels = true;
-env.backends.onnx.wasm.numThreads = 1;
+// NO toques env.backends.onnx.wasm.numThreads acá
 
-// Puerto que provee Railway
 const PORT = process.env.PORT || 3000;
 const MODEL_ID = process.env.MODEL_ID || 'Xenova/vit-gpt2-image-captioning';
 
-// Opcional: ruta de cache local (mejor si añadís un Volume en Railway y setear TRANSFORMERS_CACHE=/opt/models)
+// cache local opcional (mejor si usás un Volume)
 process.env.XENOVA_USE_LOCAL_MODELS = process.env.XENOVA_USE_LOCAL_MODELS ?? '1';
 process.env.TRANSFORMERS_CACHE = process.env.TRANSFORMERS_CACHE ?? './.models-cache';
 
 const app = express();
 app.use(express.json({ limit: '20mb' }));
 
-// CORS simple
 app.use((req, res, next) => {
   res.setHeader('Access-Control-Allow-Origin', req.headers.origin || '*');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
@@ -28,7 +27,6 @@ app.use((req, res, next) => {
   next();
 });
 
-// Health MUY liviano (no carga el modelo para no tumbar el arranque)
 app.get('/health', (_req, res) => {
   res.json({ ok: true, model: MODEL_ID });
 });
@@ -42,7 +40,6 @@ async function getPipe() {
   return pipePromise;
 }
 
-// Descarga imagen (URL o dataURL/base64)
 async function getImageBytes(input) {
   if (!input) throw new Error('Falta image_url o image_base64');
   if (typeof input === 'string' && /^https?:\/\//i.test(input)) {
@@ -54,10 +51,7 @@ async function getImageBytes(input) {
     const b64 = input.split(',')[1];
     return Buffer.from(b64, 'base64');
   }
-  if (typeof input === 'string') {
-    // asume base64 crudo
-    return Buffer.from(input, 'base64');
-  }
+  if (typeof input === 'string') return Buffer.from(input, 'base64');
   throw new Error('Formato de imagen no soportado');
 }
 
@@ -66,20 +60,20 @@ app.post('/caption', async (req, res) => {
     const { image_url, image_base64 } = req.body || {};
     const bytes = await getImageBytes(image_url || image_base64);
 
-    const pipe = await getPipe(); // carga perezosa (no en el arranque)
+    const pipe = await getPipe();
     const t0 = Date.now();
     const out = await pipe(bytes, { max_new_tokens: 40 });
-    const ms = Date.now() - t0;
-
-    res.json({ caption: out?.[0]?.generated_text ?? '', model: MODEL_ID, latency_ms: ms });
+    res.json({
+      caption: out?.[0]?.generated_text ?? '',
+      model: MODEL_ID,
+      latency_ms: Date.now() - t0
+    });
   } catch (e) {
     console.error('Error /caption:', e);
     res.status(500).json({ error: String(e.message || e) });
   }
 });
 
-// Importante: escuchar en el puerto de Railway y en 0.0.0.0
 app.listen(PORT, '0.0.0.0', () => {
   console.log(`✅ Server escuchando en 0.0.0.0:${PORT}`);
-  // NO precargamos el modelo en el arranque para evitar timeouts/crashes
 });
