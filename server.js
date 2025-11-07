@@ -1,20 +1,31 @@
+// server.js
 import 'dotenv/config';
 import express from 'express';
 import fetch from 'node-fetch';
 import { pipeline, env } from '@xenova/transformers';
 
-// Forzar ONNX vía WASM
+// ------------ Xenova / ONNX (WASM) ------------
 env.backends.onnx = 'wasm';
 env.useBrowserCache = false;
 env.allowLocalModels = true;
 
+// Cache local (opcional, ideal si montás un Volume)
+process.env.XENOVA_USE_LOCAL_MODELS =
+  process.env.XENOVA_USE_LOCAL_MODELS ?? '1';
+process.env.TRANSFORMERS_CACHE =
+  process.env.TRANSFORMERS_CACHE ?? './.models-cache';
+
+// ------------ Config ------------
 const PORT = process.env.PORT || 8080;
-const MODEL_ID = process.env.MODEL_ID || 'Xenova/vit-gpt2-image-captioning';
+const PRIMARY_MODEL = process.env.MODEL_ID || 'Xenova/vit-gpt2-image-captioning';
+const FALLBACK_MODEL = 'Xenova/tiny-vit-gpt2';
 
-// Cache local (ideal si montás un Volume en Railway)
-process.env.XENOVA_USE_LOCAL_MODELS = process.env.XENOVA_USE_LOCAL_MODELS ?? '1';
-process.env.TRANSFORMERS_CACHE = process.env.TRANSFORMERS_CACHE ?? './.models-cache';
+// Estado global del pipeline
+let pipePromise = null;   // promesa del pipeline
+let ready = false;        // listo para inferir
+let activeModel = null;   // cuál quedó cargado (primary o tiny)
 
+// ------------ App ------------
 const app = express();
 app.use(express.json({ limit: '20mb' }));
 
@@ -33,87 +44,108 @@ app.get('/', (_req, res) => {
 });
 
 app.get('/health', (_req, res) => {
-  res.json({ ok: true, model: MODEL_ID });
+  res.json({ ok: true, model: activeModel || PRIMARY_MODEL });
 });
 
-// ===================
-//  ÚNICO getPipe()
-// ===================
-let pipePromise = null;
-let ready = false;
-
+// ------------ Carga perezosa con fallback ------------
 async function getPipe() {
-  if (!pipePromise) {
-    console.log('🔄 Cargando modelo:', MODEL_ID);
-    pipePromise = pipeline('image-to-text', MODEL_ID)
-      .then(p => {
-        ready = true;
-        console.log('✅ Modelo listo');
-        return p;
-      })
-      .catch(err => {
-        ready = false;
+  if (pipePromise) return pipePromise;
+
+  // Func que setea estado común
+  const finish = (p, modelId) => {
+    activeModel = modelId;
+    ready = true;
+    console.log(`✅ Modelo listo: ${modelId}`);
+    return p;
+  };
+
+  console.log('🔄 Cargando modelo (primary):', PRIMARY_MODEL);
+  pipePromise = pipeline('image-to-text', PRIMARY_MODEL)
+    .then(p => finish(p, PRIMARY_MODEL))
+    .catch(async (err) => {
+      // Log y fallback al tiny
+      console.error('⚠️  Error cargando primary, aplico fallback al tiny:', err?.message || err);
+      console.log('🔁 Cargando modelo (fallback):', FALLBACK_MODEL);
+      try {
+        const p2 = await pipeline('image-to-text', FALLBACK_MODEL);
+        return finish(p2, FALLBACK_MODEL);
+      } catch (err2) {
+        // Si también falla, reseteo y propago
         pipePromise = null;
-        throw err;
-      });
-  }
+        ready = false;
+        activeModel = null;
+        throw err2;
+      }
+    });
+
   return pipePromise;
 }
 
-// Helper de imagen
-async function getImageBytes(input) {
-  if (!input) throw new Error('Falta image_url o image_base64');
-  if (/^https?:\/\//i.test(input)) {
-    const r = await fetch(input, { headers: { 'User-Agent': 'Mozilla/5.0' } });
-    if (!r.ok) throw new Error(`fetch ${r.status}`);
-    return new Uint8Array(await r.arrayBuffer());
-  }
-  if (input.startsWith('data:image/')) {
-    return Buffer.from(input.split(',')[1], 'base64');
-  }
-  return Buffer.from(input, 'base64');
-}
-
-// Endpoint principal
-app.post('/caption', async (req, res) => {
-  try {
-    const { image_url, image_base64 } = req.body || {};
-    const bytes = await getImageBytes(image_url || image_base64);
-
-    const pipe = await getPipe(); // asegura modelo cargado
-    const t0 = Date.now();
-    const out = await pipe(bytes, { max_new_tokens: 40 });
-
-    res.json({
-      caption: out?.[0]?.generated_text ?? '',
-      model: MODEL_ID,
-      latency_ms: Date.now() - t0
-    });
-  } catch (e) {
-    console.error('Error /caption:', e);
-    res.status(500).json({ error: String(e.message || e) });
-  }
-});
-
-// Warmup & ready
+// Endpoints de warmup / ready
 app.get('/warmup', async (_req, res) => {
   try {
-    await getPipe();
-    res.json({ ready: true, model: MODEL_ID });
+    await getPipe(); // espera a que termine de cargar (primary o tiny)
+    res.json({ ready: true, model: activeModel });
   } catch (e) {
     console.error('Warmup error:', e);
-    res.status(500).json({ ready: false, error: String(e.message || e) });
+    res.status(500).json({ ready: false, error: String(e?.message || e) });
   }
 });
 
 app.get('/ready', (_req, res) => {
-  res.json({ ready, model: MODEL_ID });
+  res.json({ ready, model: activeModel });
 });
 
-// Calentar al arrancar (no bloquea)
-getPipe().catch(() => {});
+// ------------ Util para obtener bytes de imagen ------------
+async function getImageBytes(input) {
+  if (!input) throw new Error('Falta image_url o image_base64');
 
-// Arrancar server
+  // URL http(s)
+  if (typeof input === 'string' && /^https?:\/\//i.test(input)) {
+    const r = await fetch(input, { headers: { 'User-Agent': 'Mozilla/5.0' } });
+    if (!r.ok) throw new Error(`fetch ${r.status} al descargar imagen`);
+    return new Uint8Array(await r.arrayBuffer());
+  }
+  // DataURL base64
+  if (typeof input === 'string' && input.startsWith('data:image/')) {
+    const b64 = input.split(',')[1];
+    return Buffer.from(b64, 'base64');
+  }
+  // Base64 "crudo"
+  if (typeof input === 'string') {
+    return Buffer.from(input, 'base64');
+  }
+
+  throw new Error('Formato de imagen no soportado');
+}
+
+// ------------ Caption endpoint ------------
+app.post('/caption', async (req, res) => {
+  try {
+    const { image_url, image_base64, max_new_tokens } = req.body || {};
+    const bytes = await getImageBytes(image_url || image_base64);
+
+    const pipe = await getPipe(); // se asegura de que haya un modelo cargado
+    const t0 = Date.now();
+    const out = await pipe(bytes, {
+      // Si querés, hacelo configurable desde el body
+      max_new_tokens: typeof max_new_tokens === 'number' ? max_new_tokens : 40,
+    });
+
+    res.json({
+      caption: out?.[0]?.generated_text ?? '',
+      model: activeModel,
+      latency_ms: Date.now() - t0,
+    });
+  } catch (e) {
+    console.error('Error /caption:', e);
+    res.status(500).json({ error: String(e?.message || e) });
+  }
+});
+
+// ------------ Arranque (precalienta sin bloquear) ------------
+getPipe().catch(() => { /* no bloquea el start; /warmup puede reintentar */ });
+
 app.listen(PORT, '0.0.0.0', () => {
   console.log(`✅ Server escuchando en 0.0.0.0:${PORT}`);
 });
