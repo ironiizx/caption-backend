@@ -3,11 +3,9 @@ import express from 'express';
 import fetch from 'node-fetch';
 import { pipeline, env } from '@xenova/transformers';
 
-// ===== FIX Railway: forzar backend ONNX a WASM (sin binarios nativos) =====
-env.backends.onnx = 'wasm';            // clave: evita onnxruntime-node
-env.useBrowserCache = false;           // no usa IndexedDB
-env.allowLocalModels = true;           // permite cache local en disco (si lo tenés)
-// opcional: menos hilos wasm si estás justo de RAM/CPU
+env.backends.onnx = 'wasm';
+env.useBrowserCache = false;
+env.allowLocalModels = true;
 env.backends.onnx.wasm.numThreads = 1;
 
 // Puerto que provee Railway
