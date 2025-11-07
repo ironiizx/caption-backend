@@ -130,13 +130,20 @@ app.post('/caption', async (req, res) => {
       return res.status(400).json({ error: 'Send image_url or image_base64' });
     }
 
-    const bytes = await getImageBytes(src);
+    // Descargar la imagen en bytes reales
+    const response = await fetch(src);
+    if (!response.ok) {
+      throw new Error(`Failed to fetch image: ${response.statusText}`);
+    }
 
-    // Asegura que el modelo esté cargado
-    const pipe = await getPipe();
+    // 👇 convertir a ArrayBuffer y luego a Uint8Array
+    const arrayBuffer = await response.arrayBuffer();
+    const bytes = new Uint8Array(arrayBuffer);
+
+    const pipe = await getPipe(); // modelo cargado
     const t0 = Date.now();
 
-    // 👇 Formato correcto para Xenova: objeto con { inputs: Uint8Array }
+    // 👇 forma correcta de llamada
     const out = await pipe(
       { inputs: bytes },
       {
@@ -147,14 +154,15 @@ app.post('/caption', async (req, res) => {
 
     res.json({
       caption: out?.[0]?.generated_text ?? '',
-      model: (typeof activeModel !== 'undefined' ? activeModel : MODEL_ID),
+      model: typeof activeModel !== 'undefined' ? activeModel : MODEL_ID,
       latency_ms: Date.now() - t0,
     });
   } catch (e) {
     console.error('Error /caption:', e);
-    res.status(500).json({ error: String(e?.message || e) });
+    res.status(500).json({ error: e?.message || String(e) });
   }
 });
+
 
 
 // ------------ Arranque (precalienta sin bloquear) ------------
