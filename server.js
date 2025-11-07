@@ -9,6 +9,8 @@ env.backends.onnx = 'wasm';
 env.useBrowserCache = false;
 env.allowLocalModels = true;
 
+env.HF_HUB_TOKEN = process.env.HF_TOKEN || undefined;
+
 // Cache local (opcional, ideal si montás un Volume)
 process.env.XENOVA_USE_LOCAL_MODELS =
   process.env.XENOVA_USE_LOCAL_MODELS ?? '1';
