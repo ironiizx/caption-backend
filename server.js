@@ -2,7 +2,7 @@
 import 'dotenv/config';
 import express from 'express';
 import fetch from 'node-fetch';
-import { pipeline, env, RawImage } from '@xenova/transformers';
+import { pipeline, env } from '@xenova/transformers';
 
 // ------------ Xenova / ONNX (WASM) ------------
 env.backends.onnx = 'wasm';
@@ -102,22 +102,26 @@ app.get('/ready', (_req, res) => {
 async function getImageBytes(input) {
   if (!input) throw new Error('Falta image_url o image_base64');
 
-  // URL http(s)
+  // Si es URL http(s)
   if (typeof input === 'string' && /^https?:\/\//i.test(input)) {
     const r = await fetch(input, { headers: { 'User-Agent': 'Mozilla/5.0' } });
     if (!r.ok) throw new Error(`fetch ${r.status}`);
+    // 🔹 Convertir a Uint8Array explícitamente
     return new Uint8Array(await r.arrayBuffer());
   }
 
-  // DataURL base64
+  // Si es data:image/...
   if (typeof input === 'string' && input.startsWith('data:image/')) {
     const b64 = input.split(',')[1];
-    return Buffer.from(b64, 'base64');
+    const buf = Buffer.from(b64, 'base64');
+    // 🔹 Convertir Buffer a Uint8Array
+    return new Uint8Array(buf);
   }
 
-  // Base64 “crudo”
+  // Si es base64 puro
   if (typeof input === 'string') {
-    return Buffer.from(input, 'base64');
+    const buf = Buffer.from(input, 'base64');
+    return new Uint8Array(buf);
   }
 
   throw new Error('Formato de imagen no soportado');
@@ -138,8 +142,9 @@ app.post('/caption', async (req, res) => {
     const t0 = Date.now();
     // Ejecutar el modelo pasando directamente los bytes
     const out = await pipe(bytes, {
-      max_new_tokens: typeof max_new_tokens === 'number' ? max_new_tokens : 40,
+    max_new_tokens: typeof max_new_tokens === 'number' ? max_new_tokens : 40,
     });
+
 
     // Responder con resultado
     res.json({
