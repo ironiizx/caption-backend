@@ -2,7 +2,7 @@
 import 'dotenv/config';
 import express from 'express';
 import fetch from 'node-fetch';
-import { pipeline, env } from '@xenova/transformers';
+import { pipeline, RawImage } from '@xenova/transformers';
 
 // ------------ Xenova / ONNX (WASM) ------------
 env.backends.onnx = 'wasm';
