@@ -145,7 +145,7 @@ app.post('/caption', async (req, res) => {
       const edgeBuffer = await sharpImg
         .clone() // importante clonar para no afectar otras tareas
         .greyscale()
-        .canny(5, 20, 10)
+        .canny()
         .raw()
         .toBuffer();
 
