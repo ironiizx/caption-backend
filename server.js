@@ -2,16 +2,13 @@
 import 'dotenv/config';
 import express from 'express';
 import { pipeline, env, RawImage } from '@xenova/transformers';
+import sharp from 'sharp'; // <--- AÑADIDO
 
 // ------------ Xenova / ONNX (WASM) ------------
 env.backends.onnx = 'wasm';
 env.useBrowserCache = false;
 env.allowLocalModels = true;
-
-// Si tenés token de HF (opcional, para modelos que lo pidan)
 env.HF_HUB_TOKEN = process.env.HF_TOKEN || undefined;
-
-// Cache local (opcional, ideal si montás un Volume en Railway)
 process.env.XENOVA_USE_LOCAL_MODELS =
   process.env.XENOVA_USE_LOCAL_MODELS ?? '1';
 process.env.TRANSFORMERS_CACHE =
@@ -23,10 +20,9 @@ const PRIMARY_MODEL =
   process.env.MODEL_ID || 'Xenova/vit-gpt2-image-captioning';
 const FALLBACK_MODEL = process.env.FALLBACK_MODEL || 'Xenova/tiny-vit-gpt2';
 
-// Estado global del pipeline
-let pipePromise = null; // promesa del pipeline (compartida)
-let ready = false;      // indica si ya está listo
-let activeModel = null; // modelo realmente cargado
+let pipePromise = null;
+let ready = false;
+let activeModel = null;
 
 // ------------ App / middlewares ------------
 const app = express();
@@ -63,7 +59,7 @@ async function getPipe() {
 
   console.log('🔄 Cargando modelo (primary):', PRIMARY_MODEL);
   pipePromise = pipeline('image-to-text', PRIMARY_MODEL)
-    .then(p => markReady(p, PRIMARY_MODEL))
+    .then((p) => markReady(p, PRIMARY_MODEL))
     .catch(async (err) => {
       console.error(
         '⚠️  Error cargando primary, aplico fallback al tiny:',
@@ -99,6 +95,15 @@ app.get('/ready', (_req, res) => {
   res.json({ ready, model: activeModel });
 });
 
+// <--- AÑADIDO: Función helper para calcular Saturación desde RGB
+function getSaturation(r, g, b) {
+  const max = Math.max(r, g, b);
+  const min = Math.min(r, g, b);
+  const l = (max + min) / 2;
+  if (l === 0 || max === min) return 0;
+  // Formula para HSL
+  return (max - min) / (1 - Math.abs(2 * l - 1));
+}
 
 // ====== Endpoint principal /caption ======
 app.post('/caption', async (req, res) => {
@@ -108,15 +113,11 @@ app.post('/caption', async (req, res) => {
     // 1) Determinar el input para RawImage.read
     let imageInput;
     if (image_url) {
-      // Es una URL, la usamos directo
       imageInput = image_url;
     } else if (image_base64) {
-      // Es base64, verificamos si es Data URL o "pura"
       if (image_base64.startsWith('data:image/')) {
-        imageInput = image_base64; // Ya es Data URL
+        imageInput = image_base64;
       } else {
-        // Es base64 "puro", le agregamos el prefijo.
-        // Asumimos jpeg, pero la biblioteca suele detectarlo bien.
         imageInput = `data:image/jpeg;base64,${image_base64}`;
       }
     } else {
@@ -126,20 +127,68 @@ app.post('/caption', async (req, res) => {
     // 2) Dejar que RawImage lea el input (URL o Data URL)
     const img = await RawImage.read(imageInput);
 
-    // 3) asegurar modelo cargado
+    // --- 3) INICIO DE MÉTRICAS CON SHARP --- // <--- AÑADIDO
+    const rawPixels = {
+      raw: {
+        width: img.width,
+        height: img.height,
+        channels: 4, // RawImage nos da RGBA, sharp necesita saber esto
+      },
+    };
+
+    // Tarea 1: Obtener estadísticas (brillo, contraste, color)
+    const stats = await sharp(img.data, rawPixels).stats();
+
+    // Tarea 2: Obtener densidad de bordes (Canny)
+    const edgeBuffer = await sharp(img.data, rawPixels)
+      .greyscale() // Canny funciona en blanco y negro
+      .canny(5, 20, 10) // (radius, sigma, low_thresh, high_thresh)
+      .raw()
+      .toBuffer();
+
+    // Calcular el promedio de bordes
+    let edgeSum = 0;
+    for (let i = 0; i < edgeBuffer.length; i++) {
+      edgeSum += edgeBuffer[i]; // píxeles de borde son 255
+    }
+    const edgeDensity = edgeSum / edgeBuffer.length / 255; // normalizado 0-1
+
+    // Organizar métricas
+    const [rStats, gStats, bStats] = stats.channels;
+    const dominantColor = `rgb(${stats.dominant.r}, ${stats.dominant.g}, ${stats.dominant.b})`;
+    
+    // Usamos el promedio de los promedios de canal (0-255)
+    const brightness = (rStats.mean + gStats.mean + bStats.mean) / 3 / 255; // normalizado 0-1
+    // Usamos el promedio de las desviaciones estándar
+    const contrast = (rStats.stdev + gStats.stdev + bStats.stdev) / 3 / 255; // normalizado 0-1
+    // Usamos el helper para el promedio de color
+    const saturation = getSaturation(rStats.mean, gStats.mean, bStats.mean);
+
+    const metrics = {
+      brightness: brightness,
+      contrast: contrast,
+      saturation: saturation,
+      dominantColor: dominantColor,
+      edgeDensity: edgeDensity,
+      textRatio: 0.0 // Dejado en 0.0 como placeholder
+    };
+    // --- 3) FIN DE MÉTRICAS CON SHARP ---
+
+    // 4) asegurar modelo cargado
     const pipe = await getPipe();
 
-    // 4) inferencia
+    // 5) inferencia
     const t0 = Date.now();
     const out = await pipe(img, {
       max_new_tokens: typeof max_new_tokens === 'number' ? max_new_tokens : 40,
     });
 
-    // 5) respuesta
+    // 6) respuesta
     res.json({
       caption: out?.[0]?.generated_text ?? '',
       model: activeModel || PRIMARY_MODEL,
       latency_ms: Date.now() - t0,
+      metrics: metrics, // <--- CORREGIDO (enviamos las métricas)
     });
   } catch (e) {
     console.error('Error /caption:', e);
@@ -147,9 +196,10 @@ app.post('/caption', async (req, res) => {
   }
 });
 
-
 // ------------ Arranque (precalienta sin bloquear) ------------
-getPipe().catch(() => { /* no bloquea el start; /warmup puede reintentar */ });
+getPipe().catch(() => {
+  /* no bloquea el start; /warmup puede reintentar */
+});
 
 app.listen(PORT, '0.0.0.0', () => {
   console.log(`✅ Server escuchando en 0.0.0.0:${PORT}`);
