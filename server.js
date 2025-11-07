@@ -1,10 +1,12 @@
 // server.js
 import 'dotenv/config';
 import express from 'express';
-import fetch from 'node-fetch'; // <--- VUELVE A AÑADIRSE
+import fetch from 'node-fetch';
 import { pipeline, env } from '@xenova/transformers';
-// import { RawImage } from '@xenova/transformers'; // <--- ELIMINADO
 import sharp from 'sharp';
+
+// ... (toda la configuración de Xenova, Config, App, CORS, / , /health, getPipe, /warmup, /ready, getImageBuffer y getSaturation sigue igual) ...
+// ... (copia y pega las líneas 5 a 130 de tu archivo actual) ...
 
 // ------------ Xenova / ONNX (WASM) ------------
 env.backends.onnx = 'wasm';
@@ -30,7 +32,6 @@ let activeModel = null;
 const app = express();
 app.use(express.json({ limit: '20mb' }));
 
-// ... (El código de CORS, / y /health sigue igual) ...
 app.use((req, res, next) => {
   res.setHeader('Access-Control-Allow-Origin', req.headers.origin || '*');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
@@ -45,8 +46,6 @@ app.get('/health', (_req, res) => {
   res.json({ ok: true, model: activeModel || PRIMARY_MODEL });
 });
 
-
-// ... (El código de getPipe(), /warmup y /ready sigue igual) ...
 async function getPipe() {
   if (pipePromise) return pipePromise;
   const markReady = (p, modelId) => {
@@ -89,30 +88,23 @@ app.get('/ready', (_req, res) => {
   res.json({ ready, model: activeModel });
 });
 
-
-// <--- AÑADIDO: Vuelve el helper para obtener un Buffer
 async function getImageBuffer(input) {
   if (!input) throw new Error('Falta image_url o image_base64');
-
-  // URL http(s)
   if (typeof input === 'string' && /^https?:\/\//i.test(input)) {
     const r = await fetch(input, { headers: { 'User-Agent': 'Mozilla/5.0' } });
     if (!r.ok) throw new Error(`fetch ${r.status}`);
     return Buffer.from(await r.arrayBuffer());
   }
-  // data URL
   if (typeof input === 'string' && input.startsWith('data:image/')) {
     const b64 = input.split(',')[1];
     return Buffer.from(b64, 'base64');
   }
-  // base64 “puro”
   if (typeof input === 'string') {
     return Buffer.from(input, 'base64');
   }
   throw new Error('Formato de imagen no soportado');
 }
 
-// <--- AÑADIDO: Helper de Saturación
 function getSaturation(r, g, b) {
   const max = Math.max(r, g, b);
   const min = Math.min(r, g, b);
@@ -122,11 +114,11 @@ function getSaturation(r, g, b) {
 }
 
 
-// ====== Endpoint principal /caption (TOTALMENTE REESCRITO) ======
+// ====== Endpoint principal /caption (MODIFICADO) ======
 app.post('/caption', async (req, res) => {
   try {
     const { image_url, image_base64, max_new_tokens } = req.body || {};
-    const t0 = Date.now(); // Inicia el timer aquí
+    const t0 = Date.now(); 
 
     // 1) Obtener la imagen como un Buffer de Node.js
     const buffer = await getImageBuffer(image_url || image_base64);
@@ -142,18 +134,8 @@ app.post('/caption', async (req, res) => {
       const stats = await sharpImg.stats();
 
       // A.2: Densidad de Bordes (Canny)
-      const edgeBuffer = await sharpImg
-        .clone() // importante clonar para no afectar otras tareas
-        .greyscale()
-        .canny()
-        .raw()
-        .toBuffer();
-
-      let edgeSum = 0;
-      for (let i = 0; i < edgeBuffer.length; i++) {
-        edgeSum += edgeBuffer[i];
-      }
-      const edgeDensity = edgeSum / edgeBuffer.length / 255;
+      // --- LA SECCIÓN DE CANNY HA SIDO ELIMINADA PORQUE FALLA EN RAILWAY ---
+      const edgeDensity = 0.0; // Dejado como placeholder
 
       // A.3: Organizar métricas
       const [rStats, gStats, bStats] = stats.channels;
@@ -163,22 +145,22 @@ app.post('/caption', async (req, res) => {
       const saturation = getSaturation(rStats.mean, gStats.mean, bStats.mean);
 
       return {
-        brightness, contrast, saturation, dominantColor, edgeDensity,
-        textRatio: 0.0, // Sigue siendo un placeholder
+        brightness, contrast, saturation, dominantColor,
+        edgeDensity: edgeDensity, // <--- AHORA ES 0.0
+        textRatio: 0.0,
       };
     })();
 
     // Tarea B: Preparar datos para la IA
     const aiDataPromise = (async () => {
-      // Extraer píxeles crudos (RGBA) que la IA entiende
       const { data, info } = await sharpImg
         .clone()
-        .ensureAlpha() // Asegura 4 canales (RGBA)
+        .ensureAlpha()
         .raw()
         .toBuffer({ resolveWithObject: true });
       
       return {
-        data: data, // Buffer de píxeles
+        data: data,
         width: info.width,
         height: info.height,
       };
@@ -194,7 +176,7 @@ app.post('/caption', async (req, res) => {
       pipePromise,
     ]);
 
-    // 5) Inferencia (ahora 'img' es el objeto de píxeles crudos)
+    // 5) Inferencia
     const out = await pipe(img, {
       max_new_tokens: typeof max_new_tokens === 'number' ? max_new_tokens : 40,
     });
