@@ -121,7 +121,8 @@ async function getImageBytes(input) {
   throw new Error('Formato de imagen no soportado');
 }
 
-// ------------ Caption endpoint ------------
+import { RawImage } from '@xenova/transformers';
+
 app.post('/caption', async (req, res) => {
   try {
     const { image_url, image_base64, max_new_tokens } = req.body || {};
@@ -130,22 +131,22 @@ app.post('/caption', async (req, res) => {
       return res.status(400).json({ error: 'Send image_url or image_base64' });
     }
 
-    // Descargar la imagen en bytes reales
+    // Descargar la imagen
     const response = await fetch(src);
-    if (!response.ok) {
-      throw new Error(`Failed to fetch image: ${response.statusText}`);
-    }
+    if (!response.ok) throw new Error(`Failed to fetch image: ${response.statusText}`);
 
-    // 👇 convertir a ArrayBuffer y luego a Uint8Array
+    // Leer como buffer
     const arrayBuffer = await response.arrayBuffer();
     const bytes = new Uint8Array(arrayBuffer);
+
+    // 🔄 Convertir a RawImage (forma compatible con Xenova)
+    const image = await RawImage.read(bytes);
 
     const pipe = await getPipe(); // modelo cargado
     const t0 = Date.now();
 
-    // 👇 forma correcta de llamada
     const out = await pipe(
-      { inputs: bytes },
+      { inputs: image },
       {
         max_new_tokens:
           typeof max_new_tokens === 'number' ? max_new_tokens : 40,
@@ -162,6 +163,7 @@ app.post('/caption', async (req, res) => {
     res.status(500).json({ error: e?.message || String(e) });
   }
 });
+
 
 
 
