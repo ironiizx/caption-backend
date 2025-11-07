@@ -2,7 +2,7 @@
 import 'dotenv/config';
 import express from 'express';
 import fetch from 'node-fetch';
-import { pipeline, env } from '@xenova/transformers';
+import { pipeline, env, RawImage } from '@xenova/transformers'; // <--- RawImage VUELVE
 import sharp from 'sharp';
 
 // ... (toda la configuración de Xenova, Config, App, CORS, / , /health, getPipe, /warmup, /ready, getImageBuffer y getSaturation sigue igual) ...
@@ -114,30 +114,36 @@ function getSaturation(r, g, b) {
 }
 
 
-// ====== Endpoint principal /caption (MODIFICADO) ======
+// ====== Endpoint principal /caption (REDISEÑADO) ======
 app.post('/caption', async (req, res) => {
   try {
     const { image_url, image_base64, max_new_tokens } = req.body || {};
-    const t0 = Date.now(); 
+    const t0 = Date.now();
 
-    // 1) Obtener la imagen como un Buffer de Node.js
+    // 1) Determinar el input (String) y el Buffer
+    let imageInput; // String (URL o Data URL)
+    if (image_url) {
+      imageInput = image_url;
+    } else if (image_base64) {
+      if (image_base64.startsWith('data:image/')) {
+        imageInput = image_base64;
+      } else {
+        imageInput = `data:image/jpeg;base64,${image_base64}`;
+      }
+    } else {
+      throw new Error('Falta image_url o image_base64 en el body');
+    }
+    
+    // Obtenemos el buffer (para Sharp)
     const buffer = await getImageBuffer(image_url || image_base64);
 
-    // 2) Cargar en sharp UNA SOLA VEZ
-    const sharpImg = sharp(buffer);
+    // 2) --- Tareas en Paralelo ---
 
-    // 3) --- Tareas en Paralelo (más rápido) ---
-
-    // Tarea A: Calcular Métricas
+    // Tarea A: Calcular Métricas (usa el Buffer)
     const metricsPromise = (async () => {
-      // A.1: Stats (brillo, contraste, color)
-      const stats = await sharpImg.stats();
+      const stats = await sharp(buffer).stats();
+      const edgeDensity = 0.0; // .canny() eliminado por estabilidad
 
-      // A.2: Densidad de Bordes (Canny)
-      // --- LA SECCIÓN DE CANNY HA SIDO ELIMINADA PORQUE FALLA EN RAILWAY ---
-      const edgeDensity = 0.0; // Dejado como placeholder
-
-      // A.3: Organizar métricas
       const [rStats, gStats, bStats] = stats.channels;
       const dominantColor = `rgb(${stats.dominant.r}, ${stats.dominant.g}, ${stats.dominant.b})`;
       const brightness = (rStats.mean + gStats.mean + bStats.mean) / 3 / 255;
@@ -146,42 +152,29 @@ app.post('/caption', async (req, res) => {
 
       return {
         brightness, contrast, saturation, dominantColor,
-        edgeDensity: edgeDensity, // <--- AHORA ES 0.0
+        edgeDensity: edgeDensity,
         textRatio: 0.0,
       };
     })();
 
-    // Tarea B: Preparar datos para la IA
-    const aiDataPromise = (async () => {
-      const { data, info } = await sharpImg
-        .clone()
-        .ensureAlpha()
-        .raw()
-        .toBuffer({ resolveWithObject: true });
-      
-      return {
-        data: data,
-        width: info.width,
-        height: info.height,
-      };
+    // Tarea B: Calcular Caption (usa el String 'imageInput')
+    const captionPromise = (async () => {
+      const pipe = await getPipe();
+      // RawImage.read() usa el string (URL o DataURL)
+      const img = await RawImage.read(imageInput); 
+      const out = await pipe(img, {
+        max_new_tokens: typeof max_new_tokens === 'number' ? max_new_tokens : 40,
+      });
+      return out;
     })();
 
-    // Tarea C: Asegurar que el modelo de IA esté listo
-    const pipePromise = getPipe();
-
-    // 4) Esperar a que todo termine
-    const [metrics, img, pipe] = await Promise.all([
+    // 3) Esperar a que ambas tareas terminen
+    const [metrics, out] = await Promise.all([
       metricsPromise,
-      aiDataPromise,
-      pipePromise,
+      captionPromise,
     ]);
 
-    // 5) Inferencia
-    const out = await pipe(img, {
-      max_new_tokens: typeof max_new_tokens === 'number' ? max_new_tokens : 40,
-    });
-
-    // 6) Respuesta
+    // 4) Respuesta
     res.json({
       caption: out?.[0]?.generated_text ?? '',
       model: activeModel || PRIMARY_MODEL,
