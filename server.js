@@ -98,68 +98,61 @@ app.get('/ready', (_req, res) => {
   res.json({ ready, model: activeModel });
 });
 
-async function toRawImage({ image_url, image_base64 }) {
-  if (image_url) {
-    // (opcional) user-agent para hosts que lo piden
-    const r = await fetch(image_url, { headers: { 'User-Agent': 'Mozilla/5.0' } });
+// -------- Util para obtener bytes de imagen --------
+async function getImageBytes(input) {
+  if (!input) throw new Error('Falta image_url o image_base64');
+
+  // URL http(s)
+  if (typeof input === 'string' && /^https?:\/\//i.test(input)) {
+    const r = await fetch(input, { headers: { 'User-Agent': 'Mozilla/5.0' } });
     if (!r.ok) throw new Error(`fetch ${r.status}`);
-    const buf = new Uint8Array(await r.arrayBuffer());
-    // fromBuffer es lo más directo en Node
-    return await RawImage.fromBuffer(buf);
+    return new Uint8Array(await r.arrayBuffer());
   }
 
-  if (!image_base64) throw new Error('Falta image_url o image_base64');
+  // DataURL base64
+  if (typeof input === 'string' && input.startsWith('data:image/')) {
+    const b64 = input.split(',')[1];
+    return Buffer.from(b64, 'base64');
+  }
 
-  // soporta data URL o base64 “puro”
-  const b64 = image_base64.startsWith('data:image/')
-    ? image_base64.split(',')[1]
-    : image_base64;
+  // Base64 “crudo”
+  if (typeof input === 'string') {
+    return Buffer.from(input, 'base64');
+  }
 
-  const buf = Buffer.from(b64, 'base64');
-  return await RawImage.fromBuffer(buf);
+  throw new Error('Formato de imagen no soportado');
 }
 
+
+// ====== Endpoint principal /caption ======
 app.post('/caption', async (req, res) => {
   try {
     const { image_url, image_base64, max_new_tokens } = req.body || {};
-    const src = image_url || image_base64;
-    if (!src) {
-      return res.status(400).json({ error: 'Send image_url or image_base64' });
-    }
 
-    // Descargar la imagen
-    const response = await fetch(src);
-    if (!response.ok) throw new Error(`Failed to fetch image: ${response.statusText}`);
+    // Obtener bytes de la imagen (desde URL o base64)
+    const bytes = await getImageBytes(image_url || image_base64);
 
-    // Leer como buffer
-    const arrayBuffer = await response.arrayBuffer();
-    const bytes = new Uint8Array(arrayBuffer);
-
-    // 🔄 Convertir a RawImage (forma compatible con Xenova)
-    const image = await RawImage.read(bytes);
-
-    const pipe = await getPipe(); // modelo cargado
-
-    const raw = await toRawImage({ image_url, image_base64 });
+    // Asegurarse de que el modelo esté cargado
+    const pipe = await getPipe();
 
     const t0 = Date.now();
+    // Ejecutar el modelo pasando directamente los bytes
+    const out = await pipe(bytes, {
+      max_new_tokens: typeof max_new_tokens === 'number' ? max_new_tokens : 40,
+    });
 
-    const out = await pipe(raw, {
-    max_new_tokens:
-    typeof max_new_tokens === 'number' ? max_new_tokens : 40,
-      }
-    );
-
+    // Responder con resultado
     res.json({
       caption: out?.[0]?.generated_text ?? '',
-      model: typeof activeModel !== 'undefined' ? activeModel : MODEL_ID,
+      model: MODEL_ID,
       latency_ms: Date.now() - t0,
     });
   } catch (e) {
     console.error('Error /caption:', e);
-    res.status(500).json({ error: e?.message || String(e) });
+    res.status(500).json({ error: String(e?.message || e) });
   }
 });
+
 
 
 
