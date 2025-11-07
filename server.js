@@ -9,7 +9,7 @@ env.useBrowserCache = false;
 env.allowLocalModels = true;
 // NO toques env.backends.onnx.wasm.numThreads acá
 
-const PORT = process.env.PORT || 3000;
+const PORT = process.env.PORT || 8080;
 const MODEL_ID = process.env.MODEL_ID || 'Xenova/vit-gpt2-image-captioning';
 
 // cache local opcional (mejor si usás un Volume)
@@ -27,9 +27,10 @@ app.use((req, res, next) => {
   next();
 });
 
-app.get('/health', (_req, res) => {
-  res.json({ ok: true, model: MODEL_ID });
+app.get('/', (_req, res) => {
+  res.type('text').send('Caption backend up. Try POST /caption or GET /health');
 });
+
 
 let pipePromise = null;
 async function getPipe() {
