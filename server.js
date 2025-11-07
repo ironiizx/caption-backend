@@ -1,7 +1,6 @@
 // server.js
 import 'dotenv/config';
 import express from 'express';
-import fetch from 'node-fetch';
 import { pipeline, env, RawImage } from '@xenova/transformers';
 
 // ------------ Xenova / ONNX (WASM) ------------
@@ -100,46 +99,32 @@ app.get('/ready', (_req, res) => {
   res.json({ ready, model: activeModel });
 });
 
-// -------- Util: obtener un Buffer de la imagen --------
-async function getImageBuffer(input) {
-  if (!input) throw new Error('Falta image_url o image_base64');
-
-  // URL http(s)
-  if (typeof input === 'string' && /^https?:\/\//i.test(input)) {
-    const r = await fetch(input, { headers: { 'User-Agent': 'Mozilla/5.0' } });
-    if (!r.ok) throw new Error(`fetch ${r.status}`);
-    // Devuelve Buffer directo desde el ArrayBuffer
-    return Buffer.from(await r.arrayBuffer());
-  }
-
-  // data URL
-  if (typeof input === 'string' && input.startsWith('data:image/')) {
-    const b64 = input.split(',')[1];
-    // Devuelve el Buffer
-    return Buffer.from(b64, 'base64');
-  }
-
-  // base64 “puro”
-  if (typeof input === 'string') {
-    // Devuelve el Buffer
-    return Buffer.from(input, 'base64');
-  }
-
-  throw new Error('Formato de imagen no soportado');
-}
 
 // ====== Endpoint principal /caption ======
 app.post('/caption', async (req, res) => {
   try {
     const { image_url, image_base64, max_new_tokens } = req.body || {};
 
-    // 1) bytes (Buffer)
-    //    👇 CAMBIO AQUÍ
-    const buffer = await getImageBuffer(image_url || image_base64);
+    // 1) Determinar el input para RawImage.read
+    let imageInput;
+    if (image_url) {
+      // Es una URL, la usamos directo
+      imageInput = image_url;
+    } else if (image_base64) {
+      // Es base64, verificamos si es Data URL o "pura"
+      if (image_base64.startsWith('data:image/')) {
+        imageInput = image_base64; // Ya es Data URL
+      } else {
+        // Es base64 "puro", le agregamos el prefijo.
+        // Asumimos jpeg, pero la biblioteca suele detectarlo bien.
+        imageInput = `data:image/jpeg;base64,${image_base64}`;
+      }
+    } else {
+      throw new Error('Falta image_url o image_base64 en el body');
+    }
 
-    // 2) usar RawImage.read (compatibilidad Node)
-    //    👇 AHORA 'buffer' ES UN BUFFER, NO UN Uint8Array
-    const img = await RawImage.read(buffer); 
+    // 2) Dejar que RawImage lea el input (URL o Data URL)
+    const img = await RawImage.read(imageInput);
 
     // 3) asegurar modelo cargado
     const pipe = await getPipe();
