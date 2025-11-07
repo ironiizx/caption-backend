@@ -1,59 +1,87 @@
 import 'dotenv/config';
 import express from 'express';
-import { pipeline } from '@xenova/transformers';
 import fetch from 'node-fetch';
+import { pipeline, env } from '@xenova/transformers';
 
+// ===== FIX Railway: forzar backend ONNX a WASM (sin binarios nativos) =====
+env.backends.onnx = 'wasm';            // clave: evita onnxruntime-node
+env.useBrowserCache = false;           // no usa IndexedDB
+env.allowLocalModels = true;           // permite cache local en disco (si lo tenés)
+// opcional: menos hilos wasm si estás justo de RAM/CPU
+env.backends.onnx.wasm.numThreads = 1;
+
+// Puerto que provee Railway
 const PORT = process.env.PORT || 3000;
-// Volvemos al modelo que SÍ es 100% compatible con tu sistema
 const MODEL_ID = process.env.MODEL_ID || 'Xenova/vit-gpt2-image-captioning';
+
+// Opcional: ruta de cache local (mejor si añadís un Volume en Railway y setear TRANSFORMERS_CACHE=/opt/models)
+process.env.XENOVA_USE_LOCAL_MODELS = process.env.XENOVA_USE_LOCAL_MODELS ?? '1';
+process.env.TRANSFORMERS_CACHE = process.env.TRANSFORMERS_CACHE ?? './.models-cache';
 
 const app = express();
 app.use(express.json({ limit: '20mb' }));
 
-// Middleware para CORS
+// CORS simple
 app.use((req, res, next) => {
-    res.setHeader('Access-Control-Allow-Origin', req.headers.origin || '*');
-    res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
-    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
-    if (req.method === 'OPTIONS') return res.sendStatus(204);
-    next();
+  res.setHeader('Access-Control-Allow-Origin', req.headers.origin || '*');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+  if (req.method === 'OPTIONS') return res.sendStatus(204);
+  next();
 });
 
-let pipePromise;
+// Health MUY liviano (no carga el modelo para no tumbar el arranque)
+app.get('/health', (_req, res) => {
+  res.json({ ok: true, model: MODEL_ID });
+});
+
+let pipePromise = null;
 async function getPipe() {
-    if (!pipePromise) {
-        console.log(`Cargando modelo de IA: ${MODEL_ID}`);
-        pipePromise = pipeline('image-to-text', MODEL_ID);
-    }
-    return await pipePromise;
+  if (!pipePromise) {
+    console.log('🔄 Cargando modelo:', MODEL_ID);
+    pipePromise = pipeline('image-to-text', MODEL_ID);
+  }
+  return pipePromise;
 }
 
-// Endpoint simplificado que solo maneja URLs
+// Descarga imagen (URL o dataURL/base64)
+async function getImageBytes(input) {
+  if (!input) throw new Error('Falta image_url o image_base64');
+  if (typeof input === 'string' && /^https?:\/\//i.test(input)) {
+    const r = await fetch(input, { headers: { 'User-Agent': 'Mozilla/5.0' } });
+    if (!r.ok) throw new Error(`fetch ${r.status} al descargar imagen`);
+    return new Uint8Array(await r.arrayBuffer());
+  }
+  if (typeof input === 'string' && input.startsWith('data:image/')) {
+    const b64 = input.split(',')[1];
+    return Buffer.from(b64, 'base64');
+  }
+  if (typeof input === 'string') {
+    // asume base64 crudo
+    return Buffer.from(input, 'base64');
+  }
+  throw new Error('Formato de imagen no soportado');
+}
+
 app.post('/caption', async (req, res) => {
-    try {
-        // n8n nos envía un JSON, así que esperamos image_url
-        const { image_url } = req.body || {};
-        if (!image_url) {
-            return res.status(400).json({ error: 'Falta image_url' });
-        }
-        
-        const pipe = await getPipe();
-        const input = String(image_url);
+  try {
+    const { image_url, image_base64 } = req.body || {};
+    const bytes = await getImageBytes(image_url || image_base64);
 
-        const captionResult = await pipe(input, { max_new_tokens: 30 });
-        const caption = captionResult?.[0]?.generated_text ?? '';
+    const pipe = await getPipe(); // carga perezosa (no en el arranque)
+    const t0 = Date.now();
+    const out = await pipe(bytes, { max_new_tokens: 40 });
+    const ms = Date.now() - t0;
 
-        // Devolvemos solo lo que el frontend (index.html) sabe mostrar
-        res.json({ caption, model: MODEL_ID });
-
-    } catch (err) {
-        console.error("Error en /caption:", err);
-        res.status(500).json({ error: String(err) });
-    }
+    res.json({ caption: out?.[0]?.generated_text ?? '', model: MODEL_ID, latency_ms: ms });
+  } catch (e) {
+    console.error('Error /caption:', e);
+    res.status(500).json({ error: String(e.message || e) });
+  }
 });
 
-app.listen(PORT, () => {
-    console.log(`✅ Servidor escuchando en http://localhost:${PORT}`);
-    console.log(`   Modelo en uso: ${MODEL_ID}`);
-    getPipe(); // Inicia la carga del modelo al arrancar para más rapidez
+// Importante: escuchar en el puerto de Railway y en 0.0.0.0
+app.listen(PORT, '0.0.0.0', () => {
+  console.log(`✅ Server escuchando en 0.0.0.0:${PORT}`);
+  // NO precargamos el modelo en el arranque para evitar timeouts/crashes
 });
