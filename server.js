@@ -130,13 +130,13 @@ app.post('/caption', async (req, res) => {
   try {
     const { image_url, image_base64, max_new_tokens } = req.body || {};
 
-    // 1) bytes (Uint8Array) desde URL/dataURL/base64
+    // 1) bytes (Uint8Array)
     const bytes = await getImageBytes(image_url || image_base64);
 
-    // 2) convertir SIEMPRE a RawImage (evita “Unsupported input type: object”)
-    const img = await RawImage.fromBuffer(bytes);
+    // 2) usar RawImage.read (compatibilidad Node)
+    const img = await RawImage.read(bytes);
 
-    // 3) asegurar que el modelo esté cargado
+    // 3) asegurar modelo cargado
     const pipe = await getPipe();
 
     // 4) inferencia
@@ -156,6 +156,7 @@ app.post('/caption', async (req, res) => {
     res.status(500).json({ error: String(e?.message || e) });
   }
 });
+
 
 // ------------ Arranque (precalienta sin bloquear) ------------
 getPipe().catch(() => { /* no bloquea el start; /warmup puede reintentar */ });
